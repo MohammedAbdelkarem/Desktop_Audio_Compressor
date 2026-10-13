@@ -3,6 +3,8 @@ using System.IO;
 using System.Windows.Forms;
 using NAudio.Wave;
 using project1;
+using project1.Audio;
+using project1.Compression;
 using System.Diagnostics;
 
 
@@ -20,6 +22,7 @@ namespace AudioCompressor
 
         private AudioFileReader audioFileReader;
         private WaveOutEvent outputDevice;
+        private readonly AudioFileService audioFileService = new AudioFileService();
         private bool cancelRequested = false;
 
 
@@ -141,140 +144,6 @@ namespace AudioCompressor
                     $"encoding: {encoding}";
             }
         }
-        private byte[] CompressMuLaw_Performance(float[] samples, int mu)
-        {
-            byte[] compressed = new byte[samples.Length];
-
-            for (int i = 0; i < samples.Length; i++)
-            {
-                if (cancelRequested)
-                    break;
-
-                float x = Math.Max(-1f, Math.Min(1f, samples[i]));
-                float sign = Math.Sign(x);
-                float magnitude = (float)(Math.Log(1 + mu * Math.Abs(x)) / Math.Log(1 + mu));
-                float y = sign * magnitude;
-
-                compressed[i] = (byte)((y + 1f) * 127.5f);
-
-                UpdatePerformance(i, samples.Length);
-            }
-
-            return compressed;
-        }
-        private byte[] CompressDPCM_Performance(float[] samples, int quantLevels)
-        {
-            short[] diffs = new short[samples.Length];
-
-            short prev = (short)(samples[0] * 32767);
-            diffs[0] = prev;
-
-            for (int i = 1; i < samples.Length; i++)
-            {
-                if (cancelRequested)
-                    break;
-
-                short current = (short)(samples[i] * 32767);
-                short diff = (short)(current - prev);
-
-                diff = (short)(diff / (32767 / quantLevels));
-
-                diffs[i] = diff;
-                prev = current;
-
-                UpdatePerformance(i, samples.Length);
-            }
-
-            byte[] bytes = new byte[diffs.Length * 2];
-            Buffer.BlockCopy(diffs, 0, bytes, 0, bytes.Length);
-
-            return bytes;
-        }
-        private byte[] CompressDelta_Performance(float[] samples, float stepSize)
-        {
-            byte[] bits = new byte[samples.Length];
-
-            float prev = samples[0];
-
-            for (int i = 1; i < samples.Length; i++)
-            {
-                if (cancelRequested)
-                    break;
-
-                if (samples[i] > prev)
-                {
-                    bits[i] = 1;
-                    prev += stepSize;
-                }
-                else
-                {
-                    bits[i] = 0;
-                    prev -= stepSize;
-                }
-
-                UpdatePerformance(i, samples.Length);
-            }
-
-            return bits;
-        }
-        private byte[] CompressAdaptiveDelta_Performance(float[] samples, float stepSize)
-        {
-            byte[] bits = new byte[samples.Length];
-
-            float prev = samples[0];
-            float step = stepSize;
-
-            for (int i = 1; i < samples.Length; i++)
-            {
-                if (cancelRequested)
-                    break;
-
-                if (samples[i] > prev)
-                {
-                    bits[i] = 1;
-                    prev += step;
-                    step *= 1.1f;
-                }
-                else
-                {
-                    bits[i] = 0;
-                    prev -= step;
-                    step *= 0.9f;
-                }
-
-                UpdatePerformance(i, samples.Length);
-            }
-
-            return bits;
-        }
-        private byte[] CompressPredictive_Performance(float[] samples, int quantLevels)
-        {
-            short[] diffs = new short[samples.Length];
-
-            float prev = samples[0];
-            diffs[0] = (short)(prev * 32767);
-
-            for (int i = 1; i < samples.Length; i++)
-            {
-                if (cancelRequested)
-                    break;
-
-                float predicted = prev;
-                float error = samples[i] - predicted;
-
-                short qError = (short)(error * quantLevels);
-
-                diffs[i] = qError;
-                prev = samples[i];
-
-                UpdatePerformance(i, samples.Length);
-            }
-
-            byte[] bytes = new byte[diffs.Length * 2];
-            Buffer.BlockCopy(diffs, 0, bytes, 0, bytes.Length);
-
-            return bytes;
-        }
         private void UpdatePerformance(int i, int total)
         {
             if (perfWindow == null || perfWindow.IsDisposed) return;
@@ -296,118 +165,6 @@ namespace AudioCompressor
             }
         }
 
-        private float[] DecompressMuLaw(byte[] compressed, int mu = 255)
-        {
-            float[] samples = new float[compressed.Length];
-
-            for (int i = 0; i < compressed.Length; i++)
-            {
-                float y = (compressed[i] / 127.5f) - 1f;
-                float sign = Math.Sign(y);
-                float magnitude = (float)((Math.Pow(1 + mu, Math.Abs(y)) - 1) / mu);
-                samples[i] = sign * magnitude;
-            }
-
-            return samples;
-        }
-        private float[] DecompressDPCM(byte[] compressed)
-        {
-            short[] diffs = new short[compressed.Length / 2];
-            Buffer.BlockCopy(compressed, 0, diffs, 0, compressed.Length);
-
-            float[] samples = new float[diffs.Length];
-
-            short prev = diffs[0];
-            samples[0] = prev / 32767f;
-
-            for (int i = 1; i < diffs.Length; i++)
-            {
-                short current = (short)(prev + diffs[i]);
-                samples[i] = current / 32767f;
-                prev = current;
-            }
-
-            return samples;
-        }
-        private float[] DecompressDelta(byte[] bits)
-        {
-            float[] samples = new float[bits.Length];
-
-            float value = 0;
-            float step = 0.01f;
-
-            samples[0] = value;
-
-            for (int i = 1; i < bits.Length; i++)
-            {
-                if (bits[i] == 1)
-                    value += step;
-                else
-                    value -= step;
-
-                samples[i] = value;
-            }
-
-            return samples;
-        }
-        private float[] DecompressAdaptiveDelta(byte[] bits)
-        {
-            float[] samples = new float[bits.Length];
-
-            float value = 0;
-            float step = 0.01f;
-
-            samples[0] = value;
-
-            for (int i = 1; i < bits.Length; i++)
-            {
-                if (bits[i] == 1)
-                {
-                    value += step;
-                    step *= 1.1f;
-                }
-                else
-                {
-                    value -= step;
-                    step *= 0.9f;
-                }
-
-                samples[i] = value;
-            }
-
-            return samples;
-        }
-        private float[] DecompressPredictive(byte[] compressed)
-        {
-            short[] diffs = new short[compressed.Length / 2];
-            Buffer.BlockCopy(compressed, 0, diffs, 0, compressed.Length);
-
-            float[] samples = new float[diffs.Length];
-
-            float prev = diffs[0] / 32767f;
-            samples[0] = prev;
-
-            for (int i = 1; i < diffs.Length; i++)
-            {
-                float error = diffs[i] / 32767f;
-                float current = prev + error;
-
-                samples[i] = current;
-                prev = current;
-            }
-
-            return samples;
-        }
-        private float[] ReadSamples(string filePath)
-        {
-            using (var reader = new AudioFileReader(filePath))
-            {
-                int sampleCount = (int)(reader.Length / sizeof(float));
-                float[] buffer = new float[sampleCount];
-                reader.Read(buffer, 0, sampleCount);
-                return buffer;
-            }
-        }
         private void btnPlay_Click(object sender, EventArgs e)
         {
             if (string.IsNullOrWhiteSpace(currentFilePath))
@@ -491,7 +248,7 @@ namespace AudioCompressor
 
             try
             {
-                float[] samples = ReadSamples(currentFilePath);
+                float[] samples = audioFileService.ReadSamples(currentFilePath);
 
                 cancelRequested = false;
 
@@ -507,29 +264,18 @@ namespace AudioCompressor
                 stopwatch.Restart();
 
                 string algo = cmbAlgorithm.SelectedItem.ToString();
-
-                switch (algo)
+                CompressionSettings settings = new CompressionSettings
                 {
-                    case "Nonlinear Quantization (μ-law)":
-                        compressedData = CompressMuLaw_Performance(samples, mu);
-                        break;
-
-                    case "DPCM":
-                        compressedData = CompressDPCM_Performance(samples, quantLevels);
-                        break;
-
-                    case "Delta Modulation":
-                        compressedData = CompressDelta_Performance(samples, stepSize);
-                        break;
-
-                    case "Adaptive Delta Modulation":
-                        compressedData = CompressAdaptiveDelta_Performance(samples, stepSize);
-                        break;
-
-                    case "Predictive Coding":
-                        compressedData = CompressPredictive_Performance(samples, quantLevels);
-                        break;
-                }
+                    Mu = mu,
+                    StepSize = stepSize,
+                    QuantizationLevels = quantLevels
+                };
+                IAudioCodec codec = AudioCodecFactory.Create(algo);
+                compressedData = codec.Compress(
+                    samples,
+                    settings,
+                    index => UpdatePerformance(index, samples.Length),
+                    () => cancelRequested);
 
                 stopwatch.Stop();
 
@@ -595,29 +341,14 @@ namespace AudioCompressor
             }
 
             string algo = cmbAlgorithm.SelectedItem.ToString();
-
-            switch (algo)
+            CompressionSettings settings = new CompressionSettings
             {
-                case "Nonlinear Quantization (μ-law)":
-                    decompressedSamples = DecompressMuLaw(compressedData);
-                    break;
-
-                case "DPCM":
-                    decompressedSamples = DecompressDPCM(compressedData);
-                    break;
-
-                case "Delta Modulation":
-                    decompressedSamples = DecompressDelta(compressedData);
-                    break;
-
-                case "Adaptive Delta Modulation":
-                    decompressedSamples = DecompressAdaptiveDelta(compressedData);
-                    break;
-
-                case "Predictive Coding":
-                    decompressedSamples = DecompressPredictive(compressedData);
-                    break;
-            }
+                Mu = (int)numMu.Value,
+                StepSize = (float)numStepSize.Value,
+                QuantizationLevels = (int)numQuantization.Value
+            };
+            IAudioCodec codec = AudioCodecFactory.Create(algo);
+            decompressedSamples = codec.Decompress(compressedData, settings);
 
             lblDecompressStatus.Text = "Decompress Done";
         }
@@ -635,13 +366,7 @@ namespace AudioCompressor
 
             if (sfd.ShowDialog() == DialogResult.OK)
             {
-                using (WaveFileWriter writer = new WaveFileWriter(sfd.FileName, new WaveFormat(44100, 1)))
-                {
-                    foreach (float sample in decompressedSamples)
-                    {
-                        writer.WriteSample(sample);
-                    }
-                }
+                audioFileService.SaveAsWave(sfd.FileName, decompressedSamples, 44100, 1);
 
                 MessageBox.Show("Decompress file save");
             }
